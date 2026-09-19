@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 export const roleSchema = z.enum(['OWNER', 'EDITOR', 'COMMENTER', 'VIEWER']);
 
+const invitationRoleSchema = z.enum(['EDITOR', 'COMMENTER', 'VIEWER']);
+
 const titleSchema = z.string().trim().min(1).max(160);
 const summarySchema = z.string().max(4000);
 const transcriptSchema = z.string().max(20_000);
@@ -59,12 +61,30 @@ export const chapterBlockCreateSchema = z
   })
   .strict();
 
+export const invitationCreateSchema = z
+  .object({
+    email: z.string().trim().toLowerCase().email().max(254),
+    role: invitationRoleSchema,
+    // 有效期：1 分钟 ~ 30 天，默认 7 天
+    ttlMinutes: z.number().int().min(1).max(30 * 24 * 60).default(7 * 24 * 60),
+  })
+  .strict();
+
+export const invitationAcceptSchema = z
+  .object({
+    token: z.string().trim().min(32).max(512),
+  })
+  .strict();
+
 export type Role = z.infer<typeof roleSchema>;
+export type InvitationRole = z.infer<typeof invitationRoleSchema>;
 export type ClipInput = z.infer<typeof clipSchema>;
 export type ClipUpdateInput = z.infer<typeof clipUpdateSchema>;
 export type ChapterCreateInput = z.infer<typeof chapterCreateSchema>;
 export type ChapterUpdateInput = z.infer<typeof chapterUpdateSchema>;
 export type ChapterBlockCreateInput = z.infer<typeof chapterBlockCreateSchema>;
+export type InvitationCreateInput = z.infer<typeof invitationCreateSchema>;
+export type InvitationAcceptInput = z.infer<typeof invitationAcceptSchema>;
 
 export const apiError = (code: string, message: string, details?: unknown) => ({
   error: { code, message, details },

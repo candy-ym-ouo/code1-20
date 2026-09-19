@@ -26,6 +26,13 @@ enum ChapterStatus {
   PUBLISHED
 }
 
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
 model User {
   id                String               @id @default(uuid())
   email             String               @unique
@@ -35,6 +42,7 @@ model User {
   updatedAt         DateTime             @updatedAt
   memberships       WorkspaceMember[]
   ownedWorkspaces   Workspace[]          @relation("WorkspaceOwner")
+  createdInvitations WorkspaceInvitation[] @relation("InvitationCreatedBy")
   recordings        Recording[]
   clipsCreated      Clip[]               @relation("ClipCreatedBy")
   clipsUpdated      Clip[]               @relation("ClipUpdatedBy")
@@ -43,20 +51,22 @@ model User {
 }
 
 model Workspace {
-  id         String               @id @default(uuid())
-  name       String
-  timezone   String               @default("Asia/Shanghai")
-  ownerId    String
-  createdAt  DateTime             @default(now())
-  updatedAt  DateTime             @updatedAt
-  deletedAt  DateTime?
-  owner      User                 @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Restrict)
-  members    WorkspaceMember[]
-  recordings Recording[]
-  people     Person[]
-  clips      Clip[]
-  chapters   Chapter[]
-  events     CollaborationEvent[]
+  id          String               @id @default(uuid())
+  name        String
+  timezone    String               @default("Asia/Shanghai")
+  memberLimit Int                  @default(50)
+  ownerId     String
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+  deletedAt   DateTime?
+  owner       User                 @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  members     WorkspaceMember[]
+  invitations WorkspaceInvitation[]
+  recordings  Recording[]
+  people      Person[]
+  clips       Clip[]
+  chapters    Chapter[]
+  events      CollaborationEvent[]
 
   @@index([ownerId])
 }
@@ -71,6 +81,30 @@ model WorkspaceMember {
 
   @@id([workspaceId, userId])
   @@index([userId])
+}
+
+model WorkspaceInvitation {
+  id          String           @id @default(uuid())
+  workspaceId String
+  email       String
+  role        Role
+  tokenHash   String           @unique
+  status      InvitationStatus @default(PENDING)
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  acceptedById String?
+  revokedAt   DateTime?
+  revokedById String?
+  // 仅在 PENDING 时非空，用于数据库层阻止同一工作区内的重复待接受邀请
+  activeKey   String?          @unique
+  createdById String
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy   User             @relation("InvitationCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([workspaceId, status])
+  @@index([email])
 }
 
 model Recording {

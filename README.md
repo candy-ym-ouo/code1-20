@@ -48,6 +48,17 @@ pnpm build
 - `GET /v1/workspaces/:id/events`
 - `GET /v1/realtime?workspaceId=...`（WebSocket）
 
+### 工作区邀请
+
+- `POST /v1/workspaces/:id/invitations`（仅 OWNER）：创建邀请，请求体 `{ email, role, ttlMinutes? }`。`role` 只能是 `EDITOR/COMMENTER/VIEWER`，`ttlMinutes` 范围 1～43200（默认 10080，即 7 天）。明文令牌只在创建响应中返回一次，数据库仅保存 SHA-256 哈希。
+- `GET /v1/workspaces/:id/invitations`（仅 OWNER）：列出邀请，状态为 `PENDING/ACCEPTED/REVOKED/EXPIRED`。
+- `DELETE /v1/workspaces/:id/invitations/:invitationId`（仅 OWNER）：撤回待接受邀请。
+- `POST /v1/invitations/accept`：请求体 `{ token }`，仅接受邮箱与登录账号一致的邀请，成功后以邀请中的角色加入工作区。
+- `GET /v1/invitations/:token`：接受前的邀请预览。
+
+邀请为**单次使用**且带有效期；接受操作在单个 `SERIALIZABLE` 事务中完成（`SELECT … FOR UPDATE` 锁定邀请行与工作区行，条件 `updateMany` 原子认领 PENDING 令牌）。因此以下情况在并发下都会确定失败，且不会产生多余成员：令牌被重复接受、邀请已撤回或已过期、工作区成员已达 `Workspace.memberLimit`（默认 50）上限、登录账号与邀请邮箱不一致、同一邮箱已存在待接受邀请（数据库 `activeKey` 唯一约束兜底）。撤回与并发接受互斥（恰好一方成功）。
+
+
 健康检查为 `GET /health` 和 `GET /ready`。
 
 ## 存储
