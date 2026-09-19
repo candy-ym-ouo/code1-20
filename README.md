@@ -37,6 +37,8 @@ pnpm build
 
 - `POST /v1/auth/register`、`POST /v1/auth/login`
 - `GET/POST /v1/workspaces`
+- `POST /v1/workspaces/:id/invitations`、`GET /v1/workspaces/:id/invitations`（仅 OWNER）
+- `GET /v1/invitations/:token`（令牌预览，无需登录）、`POST /v1/invitations/:token/accept`、`DELETE /v1/invitations/:id`
 - `POST /v1/workspaces/:id/recordings/uploads`
 - `GET /v1/recordings/:id/file`（支持 HTTP Range）
 - `GET/POST /v1/recordings/:id/clips`
@@ -49,6 +51,14 @@ pnpm build
 - `GET /v1/realtime?workspaceId=...`（WebSocket）
 
 健康检查为 `GET /health` 和 `GET /ready`。
+
+## 工作区邀请
+
+邀请由工作区 OWNER 发起，角色限定为 `EDITOR`、`COMMENTER`、`VIEWER`，有效期 5 分钟至 30 天（默认 7 天）。创建时返回一次性明文令牌（`wvinv_` 前缀，32 字节随机），数据库只保存其 SHA-256 摘要；接受后令牌变为 `ACCEPTED`，不可再次使用。受邀邮箱与接受账号的邮箱必须一致。
+
+并发安全由数据库保证：同一工作区的创建/撤回/接受事务先对工作区行 `SELECT … FOR UPDATE` 串行化；`(workspaceId, lower(email)) WHERE status = 'PENDING'` 部分唯一索引防止重复待接受邀请，接受时对邀请行做 `status = 'PENDING'` 条件更新，并依赖 `WorkspaceMember` 复合主键兜底。因此成员满额（`Workspace.memberLimit`，默认 50）、重复邀请或撤回之后的并发接受都确定失败，成员数绝不会超额。
+
+邀请相关集成测试（`apps/api/src/__tests__/`）使用 embedded-postgres 启动真实的 PostgreSQL 16，覆盖单次使用、邮箱角色校验、过期、撤回并发交错与满额竞争场景；可通过 `TEST_DATABASE_URL` 指向外部数据库运行。
 
 ## 存储
 

@@ -22,23 +22,22 @@ import {
   chapterUpdateSchema,
   clipSchema,
   clipUpdateSchema,
+  invitationAcceptSchema,
+  invitationCreateSchema,
 } from '@history/contracts';
+import { HttpError } from './errors.js';
+import {
+  acceptInvitation,
+  createInvitation,
+  findMembership,
+  listInvitations,
+  previewInvitation,
+  revokeInvitation,
+} from './invitations.js';
 
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
 const ALLOWED_AUDIO_EXTENSIONS = /\.(aac|aiff|flac|m4a|mp3|mp4|oga|ogg|opus|wav|webm)$/i;
 const DEFAULT_JWT_SECRET = 'development-secret-change-me-development';
-
-class HttpError extends Error {
-  constructor(
-    public readonly statusCode: number,
-    public readonly code: string,
-    message: string,
-    public readonly details?: unknown,
-  ) {
-    super(message);
-    this.name = 'HttpError';
-  }
-}
 
 const registerSchema = z
   .object({
@@ -78,7 +77,7 @@ const storage = path.isAbsolute(configuredStorage)
 await mkdir(storage, { recursive: true });
 
 const prisma = new PrismaClient();
-const app = Fastify({ logger: true });
+export const app = Fastify({ logger: true });
 const port = Number(process.env.PORT || 4000);
 const webOrigins = (process.env.WEB_ORIGIN || process.env.APP_ORIGIN || 'http://localhost:5173')
   .split(',')
@@ -87,6 +86,9 @@ const webOrigins = (process.env.WEB_ORIGIN || process.env.APP_ORIGIN || 'http://
 
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
   maxRetriesPerRequest: null,
+  // 测试环境（无 Redis）只尝试一次，避免刷屏式重连日志。
+  retryStrategy: (times) =>
+    process.env.NODE_ENV === 'test' ? (times > 1 ? null : 100) : Math.min(times * 200, 10_000),
 });
 redis.on('error', (error) => app.log.warn({ err: error }, 'Redis connection error'));
 
@@ -128,23 +130,13 @@ function authUser(req: FastifyRequest): AuthUser {
   return req.user as AuthUser;
 }
 
-async function findMembership(workspaceId: string, userId: string, roles?: Role[]) {
-  const membership = await prisma.workspaceMember.findUnique({
-    where: { workspaceId_userId: { workspaceId, userId } },
-  });
-  if (!membership || (roles && !roles.includes(membership.role))) {
-    return null;
-  }
-  return membership;
-}
-
 async function requireMembership(
   req: FastifyRequest,
   workspaceId: string,
   roles?: Role[],
 ): Promise<void> {
-  const membership = await findMembership(workspaceId, authUser(req).id, roles);
-  if (!membership) {
+  const membership = await findMembership(prisma, workspaceId, authUser(req).id);
+  if (!membership || (roles && !roles.includes(membership.role))) {
     throw new HttpError(404, 'NOT_FOUND', '资源不存在');
   }
 }
@@ -377,6 +369,57 @@ app.get('/v1/workspaces', { preHandler: authenticate }, async (req) => {
 });
 
 app.post(
+  '/v1/workspaces/:id/invitations',
+  { preHandler: authenticate },
+  async (req, reply) => {
+    const workspaceId = (req.params as { id: string }).id;
+    const body = validationError(invitationCreateSchema, req.body);
+    const result = await createInvitation(prisma, {
+      workspaceId,
+      actorId: authUser(req).id,
+      email: body.email,
+      role: body.role as Role,
+      ttlSeconds: body.ttlSeconds,
+    });
+    return reply.code(201).send({ data: result });
+  },
+);
+
+app.get(
+  '/v1/workspaces/:id/invitations',
+  { preHandler: authenticate },
+  async (req) => {
+    const workspaceId = (req.params as { id: string }).id;
+    return {
+      data: await listInvitations(prisma, workspaceId, authUser(req).id),
+    };
+  },
+);
+
+// 接受前的公开预览，令牌即凭证，不要求已登录；前端据此展示工作区名与登录入口。
+app.get('/v1/invitations/:token', async (req) => {
+  const token = (req.params as { token: string }).token;
+  return { data: await previewInvitation(prisma, token) };
+});
+
+app.post('/v1/invitations/:token/accept', { preHandler: authenticate }, async (req) => {
+  const token = (req.params as { token: string }).token;
+  // 再做一次令牌形态校验，避免明显非法的输入参与摘要查询。
+  validationError(invitationAcceptSchema, { token });
+  const result = await acceptInvitation(prisma, token, authUser(req).id);
+  return { data: result };
+});
+
+app.delete(
+  '/v1/invitations/:invitationId',
+  { preHandler: authenticate },
+  async (req) => {
+    const invitationId = (req.params as { invitationId: string }).invitationId;
+    return { data: await revokeInvitation(prisma, invitationId, authUser(req).id) };
+  },
+);
+
+app.post(
   '/v1/workspaces/:id/recordings/uploads',
   { preHandler: authenticate },
   async (req, reply) => {
@@ -497,7 +540,7 @@ app.get('/v1/recordings/:id/file', async (req, reply) => {
   }
 
   const user = await resolveRequestUser(req);
-  if (!user || !(await findMembership(recording.workspaceId, user.id))) {
+  if (!user || !(await findMembership(prisma, recording.workspaceId, user.id))) {
     throw new HttpError(404, 'NOT_FOUND', '录音不存在');
   }
 
@@ -904,7 +947,7 @@ app.get('/v1/realtime', { websocket: true }, async (socket: any, req: any) => {
   if (
     !user ||
     !workspaceId ||
-    !(await findMembership(workspaceId, user.id))
+    !(await findMembership(prisma, workspaceId, user.id))
   ) {
     socket.close(1008, 'forbidden');
     return;
@@ -929,9 +972,12 @@ app.addHook('onClose', async () => {
   await prisma.$disconnect();
 });
 
-try {
-  await app.listen({ port, host: '0.0.0.0' });
-} catch (error) {
-  app.log.error(error);
-  process.exit(1);
+// 测试中通过 app.inject() 驱动路由，不占用端口。
+if (process.env.NODE_ENV !== 'test') {
+  try {
+    await app.listen({ port, host: '0.0.0.0' });
+  } catch (error) {
+    app.log.error(error);
+    process.exit(1);
+  }
 }
